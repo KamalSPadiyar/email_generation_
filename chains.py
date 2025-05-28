@@ -1,65 +1,67 @@
+from dotenv import load_dotenv
 import os
-os.environ["USER_AGENT"] = "llm-email-app/1.0"
 
-
+load_dotenv()
+import requests
+from bs4 import BeautifulSoup
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.exceptions import OutputParserException
-from dotenv import load_dotenv
-
-from dotenv import load_dotenv
-load_dotenv()
-
+from langchain_core.runnables import RunnableLambda
 
 class Chain:
-    def __init__(self):
-        self.llm = ChatGroq(temperature=0, groq_api_key=os.getenv("GROQ_API_KEY"), model_name="llama3-70b-8192")
-
-    def extract_jobs(self, cleaned_text):
-        prompt_extract = PromptTemplate.from_template(
-            """
-            ### SCRAPED TEXT FROM WEBSITE:
-            {page_data}
-            ### INSTRUCTION:
-            The scraped text is from the career's page of a website.
-            Your job is to extract the job postings and return them in JSON format containing the following keys: `role`, `experience`, `skills` and `description`.
-            Only return the valid JSON.
-            ### VALID JSON (NO PREAMBLE):
-            """
+    def __init__(self, name="John Doe", tone="Formal", resume_text="", language="English"):
+        self.name = name
+        self.tone = tone
+        self.resume_text = resume_text
+        self.language = language
+        self.llm = ChatGroq(
+            temperature=0,
+            groq_api_key=os.getenv("GROQ_API_KEY"),
+            model_name="llama3-70b-8192"
         )
-        chain_extract = prompt_extract | self.llm
-        res = chain_extract.invoke(input={"page_data": cleaned_text})
-        try:
-            json_parser = JsonOutputParser()
-            res = json_parser.parse(res.content)
-        except OutputParserException:
-            raise OutputParserException("Context too big. Unable to parse jobs.")
-        return res if isinstance(res, list) else [res]
 
-    def write_mail(self, job, links):
+    def scrape_job_description(self, url):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            for script in soup(["script", "style"]):
+                script.extract()
+
+            text = soup.get_text(separator="\n")
+            lines = [line.strip() for line in text.splitlines()]
+            text = "\n".join(line for line in lines if line)
+            return text
+        except Exception as e:
+            raise RuntimeError(f"Failed to scrape URL: {e}")
+
+    def write_mail(self, job_description):
         prompt_email = PromptTemplate.from_template(
             """
             ### JOB DESCRIPTION:
             {job_description}
 
-            ### INSTRUCTION:
-            You are Mohan, a business development executive at AtliQ. AtliQ is an AI & Software Consulting company dedicated to facilitating
-            the seamless integration of business processes through automated tools. 
-            Over our experience, we have empowered numerous enterprises with tailored solutions, fostering scalability, 
-            process optimization, cost reduction, and heightened overall efficiency. 
-            Your job is to write a cold email to the client regarding the job mentioned above describing the capability of AtliQ 
-            in fulfilling their needs.
-            Also add the most relevant ones from the following links to showcase Atliq's portfolio: {link_list}
-            Remember you are Mohan, BDE at AtliQ. 
-            Do not provide a preamble.
-            ### EMAIL (NO PREAMBLE):
+            ### CANDIDATE DETAILS:
+            Name: {user_name}
+            Resume Summary: {resume_text}
+            Tone: {tone_style}
+            Language: {language}
 
+            ### INSTRUCTION:
+            Write a concise and personalized cold email applying for the job described above.
+            Use the candidate's name and tone style.
+            Highlight relevant experience from the resume.
+            Use the specified language.
+            ### EMAIL ONLY:
             """
         )
-        chain_email = prompt_email | self.llm
-        res = chain_email.invoke({"job_description": str(job), "link_list": links})
-        return res.content
-
-if __name__ == "__main__":
-    print(os.getenv("GROQ_API_KEY"))
+        chain_email = prompt_email | self.llm | RunnableLambda(lambda x: x.content)
+        email_text = chain_email.invoke({
+            "job_description": job_description,
+            "user_name": self.name,
+            "resume_text": self.resume_text,
+            "tone_style": self.tone,
+            "language": self.language
+        })
+        return email_text
